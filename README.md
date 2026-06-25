@@ -1,5 +1,3 @@
-# lqt
-
 # LQT Cardiac Optical Mapping Analysis
 
 Analysis pipeline for cardiac action potential duration (APD) detection
