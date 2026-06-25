@@ -14,7 +14,7 @@ Run scripts in order:
 3. `02_show_APD-map.py` — projects APD values onto a 3D heart mesh;
    shows coverage and spatial distribution of action potential durations
 4. `03_clustering.py` — morphology-based clustering of traces to classify
-   signal quality *(work in progress)*
+   signal quality and common LQT features *(work in progress)*
 
 ## Data
 
@@ -36,4 +36,5 @@ Two recording sessions:
 
 Analysis compares normal and Long QT recordings across two experimental
 sessions. The pipeline uses FFT-based frequency profiling and a Butterworth
-low-pass filter for signal smoothing prior to APD feature extraction.
+low-pass filter for signal smoothing prior to APD feature extraction and
+visual mapping.
