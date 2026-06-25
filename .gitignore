@@ -1,0 +1,15 @@
+# Data files
+data/
+*.npy
+*.bin
+*.zip
+*.xlsx
+*.png
+*.pdf
+rec02_corrected_plots/
+rec07_corrected_plots/
+figures/
+literature/
+
+# Mac junk
+.DS_Store
