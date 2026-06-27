@@ -40,11 +40,11 @@ Two recording sessions:
 |-----|--------|
 | `Space` | Play / Pause the cardiac wave animation (hides plots for full view) |
 | `F` | Search for a triangle by number — type the ID and press Enter to jump to it |
-| `Enter` | Confirm triangle search / refresh plots for current triangle |
+| `Enter` | Center sphere on triangle of displayed plot |
 | `O` | Switch to **Original** processing pipeline |
 | `N` | Switch to **New** processing pipeline |
 | `↑ ↓ ← →` | Move the selection sphere across the 3D mesh |
-| `+` / `=` | Zoom in |
+| `+` | Zoom in |
 | `-` | Zoom out |
 
 ### Features
