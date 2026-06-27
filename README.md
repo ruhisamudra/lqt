@@ -32,9 +32,27 @@ Two recording sessions:
 - scipy
 - vtk
 
-## Notes
+## Controls & Features
 
-Analysis compares normal and Long QT recordings across two experimental
-sessions. The pipeline uses FFT-based frequency profiling and a Butterworth
-low-pass filter for signal smoothing prior to APD feature extraction and
-visual mapping.
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play / Pause the cardiac wave animation (hides plots for full view) |
+| `F` | Search for a triangle by number — type the ID and press Enter to jump to it |
+| `Enter` | Confirm triangle search / refresh plots for current triangle |
+| `O` | Switch to **Original** processing pipeline |
+| `N` | Switch to **New** processing pipeline |
+| `↑ ↓ ← →` | Move the selection sphere across the 3D mesh |
+| `+` / `=` | Zoom in |
+| `-` | Zoom out |
+
+### Features
+
+- **3D Cardiac Mesh Viewer** — Renders the heart mesh with APD (Action Potential Duration) color mapping
+- **Wave Animation** — Press Space to play a real-time fluorescence wave propagating across the mesh
+- **APD Color Map** — Triangles are colored from white → green → yellow → red based on APD duration (0–320 ms)
+- **Triangle Inspector** — Move the blue sphere to any triangle to instantly see its signal trace, derivatives, baseline correction, and corrected trace in a side panel
+- **Pipeline Comparison** — Switch between Original and New signal processing pipelines on the fly with O/N keys
+- **Triangle Search** — Press F, type a triangle number, and press Enter to jump the sphere directly to that triangle
+- **APD Readout** — Corner display shows the current triangle ID, APD1, and APD2 values in milliseconds
