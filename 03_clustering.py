@@ -1,422 +1,217 @@
-# import numpy as np
-# import os
-# import matplotlib.pyplot as plt
-# from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
-# from scipy.fft import fft, fftfreq
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.cluster import KMeans
-# from sklearn.decomposition import PCA
-# import warnings
-# warnings.filterwarnings("ignore")
-
-# # ─── Settings ───────────────────────────────────────────────────────────────
-
-# recnum         = "rec02"
-# folder         = f"data/2025-07-23/{recnum}/timeseries ratiometric raw/"
-# output_dir     = f"data/2025-07-23/{recnum}/"
-# N_CLUSTERS     = 6       # adjust after seeing elbow plot
-# sampling_rate  = 250.0
-# MIN_APD_MS     = 140.0
-# MAX_APD_MS     = 600.0
-# MAX_PHASE_MS   = 500.0
-# APD_THRESHOLD  = 0.1     # for APD90 on corrected trace
-
-# files = sorted([f for f in os.listdir(folder) if f.endswith(".npy")])
-# n_traces = len(files)
-# print(f"Found {n_traces} traces in {folder}")
-
-
-# # ─── Filter helpers ──────────────────────────────────────────────────────────
-
-# def butter_lowpass(data, cutoff=15.0, fs=250.0, order=4):
-#     nyq = 0.5 * fs
-#     b, a = butter(order, cutoff / nyq, btype="low", analog=False)
-#     return filtfilt(b, a, data)
-
-# def get_cutoff(raw_norm, sampling_rate):
-#     n = len(raw_norm)
-#     fft_vals  = np.abs(fft(raw_norm))
-#     fft_freqs = fftfreq(n, d=1.0 / sampling_rate)
-#     half      = n // 2
-#     freqs_s   = fft_freqs[:half]
-#     vals_s    = fft_vals[:half]
-#     slope     = np.gradient(vals_s)
-#     i0 = np.searchsorted(freqs_s, 3.0)
-#     i1 = np.searchsorted(freqs_s, 50.0)
-#     idx = i0 + np.argmax(slope[i0:i1])
-#     return float(np.clip(freqs_s[idx], 15.0, 45.0))
-
-
-# # ─── Core pipeline: returns corrected trace + all detection info ─────────────
-
-# def process_trace(raw_trace):
-#     """
-#     Returns a dict with:
-#       - corrected   : baseline-corrected trace (panel 4 equivalent)
-#       - raw_norm    : normalized raw trace
-#       - smooth      : butterworth filtered trace
-#       - first_deriv, second_deriv
-#       - upstroke_indices, steep_indices, repol_indices  (from panel 1 detection)
-#       - apd_ms      : APD90 measured on corrected trace (panel 4)
-#       - success     : bool
-#     """
-#     n       = len(raw_trace)
-#     time_ms = np.linspace(0, 1000, n)
-#     spm     = n / 1000.0
-
-#     rng = raw_trace.max() - raw_trace.min()
-#     if rng < 1e-9:
-#         return {"success": False, "reason": "flat"}
-
-#     raw_norm = (raw_trace - raw_trace.min()) / rng
-
-#     cutoff = get_cutoff(raw_norm, sampling_rate)
-#     smooth = butter_lowpass(raw_norm, cutoff=cutoff, fs=sampling_rate)
-#     fd     = np.gradient(smooth)
-#     sd     = np.gradient(fd)
-
-#     min_dist = int(100 * spm)
-#     ups, _   = find_peaks(fd, height=0.05, distance=min_dist, prominence=0.05)
-
-#     if len(ups) == 0:
-#         return {"success": False, "reason": "no_upstroke"}
-
-#     min_apd_f   = int(MIN_APD_MS * spm)
-#     max_phase_f = int(MAX_PHASE_MS * spm)
-#     steeps, repols = [], []
-
-#     for i, up_idx in enumerate(ups):
-#         next_up      = ups[i + 1] if i + 1 < len(ups) else n - 1
-#         win_start    = up_idx + min_apd_f
-#         win_end      = min(up_idx + max_phase_f, next_up, n - 1)
-#         if win_start >= win_end:
-#             win_start = up_idx + 5
-#         steep = win_start + np.argmin(fd[win_start:win_end])
-#         steeps.append(steep)
-#         s_end = min(steep + 25, win_end)
-#         repol = steep + (np.argmax(sd[steep:s_end]) if s_end > steep else 0)
-#         repols.append(repol)
-
-#     # ── Baseline correction (same as panel 3→4) ──────────────────────────
-#     bl = raw_norm.copy()
-#     for up, re in zip(ups, repols):
-#         bl[up:re] = np.nan
-#     x_all   = np.arange(n)
-#     x_valid = x_all[~np.isnan(bl)]
-#     y_valid = bl[~np.isnan(bl)]
-#     bl_interp  = np.interp(x_all, x_valid, y_valid)
-#     bl_smooth  = savgol_filter(bl_interp, window_length=21, polyorder=3)
-#     corrected  = raw_norm - bl_smooth
-
-#     # ── APD90 on corrected trace ──────────────────────────────────────────
-#     apd_values = []
-#     for up_idx in ups:
-#         beat_start = up_idx
-#         beat_end   = int(min(up_idx + MAX_PHASE_MS * spm, n - 1))
-#         beat       = corrected[beat_start:beat_end]
-#         peak       = beat.max()
-#         if peak <= 0:
-#             continue
-#         beat_norm = beat / peak
-#         below = np.where(beat_norm[1:] < APD_THRESHOLD)[0]
-#         if len(below) == 0:
-#             continue
-#         repol_idx = beat_start + below[0] + 1
-#         apd_values.append((repol_idx - up_idx) / spm)
-
-#     apd_ms = float(np.mean(apd_values)) if apd_values else np.nan
-
-#     return {
-#         "success":          True,
-#         "raw_norm":         raw_norm,
-#         "smooth":           smooth,
-#         "first_deriv":      fd,
-#         "second_deriv":     sd,
-#         "corrected":        corrected,
-#         "time_ms":          time_ms,
-#         "upstroke_indices": ups,
-#         "steep_indices":    np.array(steeps),
-#         "repol_indices":    np.array(repols),
-#         "apd_ms":           apd_ms,
-#         "n_upstrokes":      len(ups),
-#     }
-
-
-# # ─── Feature extraction from corrected trace ─────────────────────────────────
-
-# def extract_features(proc):
-#     corrected = proc["corrected"]
-#     time_ms   = proc["time_ms"]
-#     ups       = proc["upstroke_indices"]
-#     n         = len(corrected)
-#     spm       = n / 1000.0
-
-#     up_idx   = ups[0]
-#     beat_end = int(min(up_idx + MAX_PHASE_MS * spm, n - 1))
-#     beat     = corrected[up_idx:beat_end]
-
-#     if len(beat) < 10:
-#         return None, None
-
-#     peak = beat.max()
-#     if peak <= 0:
-#         return None, None
-
-#     beat_norm = beat / peak
-#     beat_len  = len(beat_norm)
-
-#     apd = proc["apd_ms"]
-
-#     # ── existing features ────────────────────────────────────────────────
-#     upstroke_steepness = float(proc["first_deriv"][up_idx])
-
-#     p20 = int(0.20 * beat_len)
-#     p70 = int(0.70 * beat_len)
-#     plateau_std  = float(np.std(beat_norm[p20:p70]))
-#     plateau_mean = float(np.mean(beat_norm[p20:p70]))
-
-#     peak_idx      = int(np.argmax(beat_norm))
-#     post_peak_min = float(beat_norm[peak_idx:].min())
-
-#     p70_abs = up_idx + p70
-#     p95_abs = min(up_idx + int(0.95 * beat_len), n - 1)
-#     repol_slope = float(np.mean(proc["first_deriv"][p70_abs:p95_abs])) \
-#                   if p95_abs > p70_abs else 0.0
-
-#     sd_plateau     = float(np.std(proc["second_deriv"][up_idx + p20: up_idx + p70]))
-#     beat_consistency = 1.0 if proc["n_upstrokes"] >= 2 else 0.0
-
-#     if proc["n_upstrokes"] >= 2:
-#         up2       = ups[1]
-#         gap_start = proc["repol_indices"][0] + 5
-#         gap_end   = up2 - 5
-#         baseline_noise = float(np.std(corrected[gap_start:gap_end])) \
-#                          if gap_end > gap_start else 0.0
-#     else:
-#         baseline_noise = float(np.std(corrected[:up_idx - 5])) if up_idx > 10 else 0.0
-
-#     # ── NEW: early notch score ───────────────────────────────────────────
-#     # Look at first 25% of the beat for a local dip in the first derivative
-#     # A notch = the signal slows down briefly just after the upstroke peak
-#     p25 = int(0.25 * beat_len)
-#     early_fd = proc["first_deriv"][up_idx: up_idx + p25]
-#     # score = how much the derivative dips negative in the early window
-#     # zero if no dip, positive number if there's a notch
-#     early_notch_score = float(max(0.0, -early_fd.min()))
-
-#     # ── NEW: repolarization duration (direct) ────────────────────────────
-#     # Time from peak to 10% of peak on the way down, in ms
-#     # This directly separates long repol from short repol
-#     peak_abs = up_idx + peak_idx
-#     after_peak = beat_norm[peak_idx:]
-#     below10 = np.where(after_peak < 0.10)[0]
-#     if len(below10) > 0:
-#         repol_duration_ms = float(below10[0] / spm)
-#     else:
-#         repol_duration_ms = float(len(after_peak) / spm)  # didn't reach 10%
-
-#     # ── NEW: plateau flatness in early vs late repol ─────────────────────
-#     # ratio of signal level at 30% vs 70% of beat
-#     # high ratio = flat plateau (signal stays high for long)
-#     # low ratio  = triangular (signal drops steadily)
-#     idx30 = int(0.30 * beat_len)
-#     idx70 = int(0.70 * beat_len)
-#     level_30 = float(beat_norm[idx30]) if idx30 < beat_len else 0.0
-#     level_70 = float(beat_norm[idx70]) if idx70 < beat_len else 0.0
-#     plateau_ratio = level_30 / (level_70 + 1e-6)
-
-#     features = {
-#         "apd_ms":             apd,
-#         "upstroke_steepness": upstroke_steepness,
-#         "plateau_std":        plateau_std,
-#         "plateau_mean":       plateau_mean,
-#         "post_peak_min":      post_peak_min,
-#         "repol_slope":        repol_slope,
-#         "secondary_hump":     sd_plateau,
-#         "beat_consistency":   beat_consistency,
-#         "baseline_noise":     baseline_noise,
-#         "early_notch_score":  early_notch_score,   # NEW
-#         "repol_duration_ms":  repol_duration_ms,   # NEW
-#         "plateau_ratio":      plateau_ratio,        # NEW
-#     }
-
-#     vec = np.array([
-#         apd if not np.isnan(apd) else -1.0,
-#         upstroke_steepness,
-#         plateau_std,
-#         plateau_mean,
-#         post_peak_min,
-#         repol_slope,
-#         sd_plateau,
-#         beat_consistency,
-#         baseline_noise,
-#         early_notch_score,    # NEW
-#         repol_duration_ms,    # NEW
-#         plateau_ratio,        # NEW
-#     ], dtype=np.float32)
-
-#     return vec, features
-
-# # ─── Run over all traces ─────────────────────────────────────────────────────
-
-# print("Extracting features from all traces...")
-
-# feature_matrix = []
-# feature_dicts  = []
-# valid_indices  = []   # trace indices that succeeded
-# failed_indices = []
-
-# for idx, fname in enumerate(files):
-#     if idx % 200 == 0:
-#         print(f"  {idx}/{n_traces}")
-
-#     raw = np.load(os.path.join(folder, fname))
-#     proc = process_trace(raw)
-
-#     if not proc["success"]:
-#         failed_indices.append(idx)
-#         continue
-
-#     vec, feat = extract_features(proc)
-#     if vec is None:
-#         failed_indices.append(idx)
-#         continue
-
-#     feature_matrix.append(vec)
-#     feature_dicts.append(feat)
-#     valid_indices.append(idx)
-
-# feature_matrix = np.array(feature_matrix)
-# valid_indices  = np.array(valid_indices)
-
-# print(f"\nSuccessful: {len(valid_indices)}/{n_traces}")
-# print(f"Failed:     {len(failed_indices)}/{n_traces}")
-
-
-# # ─── Elbow plot to pick K ────────────────────────────────────────────────────
-
-# print("Computing elbow plot...")
-# scaler    = StandardScaler()
-# X_scaled  = scaler.fit_transform(feature_matrix)
-
-# inertias = []
-# k_range  = range(2, 12)
-# for k in k_range:
-#     km = KMeans(n_clusters=k, random_state=42, n_init=10)
-#     km.fit(X_scaled)
-#     inertias.append(km.inertia_)
-
-# plt.figure(figsize=(7, 4))
-# plt.plot(list(k_range), inertias, "o-", color="black", linewidth=2)
-# plt.xlabel("Number of clusters (k)")
-# plt.ylabel("Inertia (within-cluster sum of squares)")
-# plt.title("Elbow plot — choose k at the bend")
-# plt.tight_layout()
-# plt.savefig(os.path.join(output_dir, "elbow_plot.png"), dpi=200)
-# plt.show()
-
-
-# # ─── K-means clustering ──────────────────────────────────────────────────────
-
-# print(f"Clustering with k={N_CLUSTERS}...")
-# km       = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init=20)
-# labels   = km.fit_predict(X_scaled)
-
-# # full label array (failed traces get label = -1)
-# all_labels = np.full(n_traces, -1, dtype=int)
-# all_labels[valid_indices] = labels
-
-# np.save(os.path.join(output_dir, "cluster_labels.npy"), all_labels)
-# print(f"Saved cluster_labels.npy")
-
-
-# # ─── PCA visualisation of clusters ───────────────────────────────────────────
-
-# pca    = PCA(n_components=2)
-# X_pca  = pca.fit_transform(X_scaled)
-
-# colors = plt.cm.tab10(np.linspace(0, 1, N_CLUSTERS))
-# plt.figure(figsize=(8, 6))
-# for c in range(N_CLUSTERS):
-#     mask = labels == c
-#     plt.scatter(X_pca[mask, 0], X_pca[mask, 1],
-#                 color=colors[c], label=f"Cluster {c}  (n={mask.sum()})",
-#                 s=8, alpha=0.6)
-# plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)")
-# plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)")
-# plt.title("PCA of trace features — coloured by cluster")
-# plt.legend(markerscale=3)
-# plt.tight_layout()
-# plt.savefig(os.path.join(output_dir, "pca_clusters.png"), dpi=200)
-# plt.show()
-
-
-# # ─── Plot 6 example traces per cluster ───────────────────────────────────────
-
-# print("Plotting example traces per cluster...")
-
-# N_EXAMPLES = 6
-
-# for c in range(N_CLUSTERS):
-#     cluster_trace_indices = valid_indices[labels == c]
-#     sample = cluster_trace_indices[:N_EXAMPLES]   # first N examples
-
-#     fig, axes = plt.subplots(1, len(sample), figsize=(4 * len(sample), 3),
-#                              sharey=True)
-#     if len(sample) == 1:
-#         axes = [axes]
-
-#     for ax, tidx in zip(axes, sample):
-#         raw  = np.load(os.path.join(folder, files[tidx]))
-#         proc = process_trace(raw)
-#         if proc["success"]:
-#             ax.plot(proc["time_ms"], proc["corrected"], color="black", linewidth=1)
-#         ax.set_title(f"#{tidx}", fontsize=8)
-#         ax.set_xlabel("Time [ms]", fontsize=7)
-#         ax.tick_params(labelsize=7)
-
-#     axes[0].set_ylabel("Corrected Signal", fontsize=8)
-#     fig.suptitle(f"Cluster {c}  —  {len(cluster_trace_indices)} traces total",
-#                  fontsize=10)
-#     plt.tight_layout()
-#     fname_out = os.path.join(output_dir, f"cluster_{c}_examples.png")
-#     plt.savefig(fname_out, dpi=200)
-#     plt.show()
-#     print(f"  Saved {fname_out}")
-
-
-# # ─── Feature summary per cluster ────────────────────────────────────────────
-
-# feature_names = [
-#     "apd_ms", "upstroke_steepness", "plateau_std", "plateau_mean",
-#     "post_peak_min", "repol_slope", "secondary_hump",
-#     "beat_consistency", "baseline_noise",
-#     "early_notch_score", "repol_duration_ms", "plateau_ratio"
-# ]
-
-# print("\n── Mean feature values per cluster ──────────────────────────────")
-# header = f"{'Feature':<22}" + "".join(f"  C{c:>5}" for c in range(N_CLUSTERS))
-# print(header)
-# for fi, name in enumerate(feature_names):
-#     row = f"{name:<22}"
-#     for c in range(N_CLUSTERS):
-#         mask = labels == c
-#         val  = feature_matrix[mask, fi].mean()
-#         row += f"  {val:>6.3f}"
-#     print(row)
-
-
-# # ─── Save feature matrix and valid indices ───────────────────────────────────
-
-# np.save(os.path.join(output_dir, "feature_matrix.npy"),  feature_matrix)
-# np.save(os.path.join(output_dir, "valid_indices.npy"),    valid_indices)
-# print("\nSaved feature_matrix.npy and valid_indices.npy")
-# print("Done.")
-
-
-
-
-# REC07777
+# STEP 1: GENERATE PLOTS AND CSV OF APD VALUES
+
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
+from scipy.fft import fft, fftfreq
+
+
+def butter_lowpass_filter(data, cutoff, fs, order=4):
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return filtfilt(b, a, data)
+
+
+def process_single_trace(file_path, filename, output_plot_dir):
+    """
+    Processes a single .npy trace file, performs signal processing,
+    extracts up to two beat APDs separated by specific time windows,
+    and saves a 4-panel diagnostic plot.
+
+    Returns: (beat1_apd, beat2_apd) or (-1, -1) if an execution error occurs.
+    """
+    try:
+        raw_trace = np.load(file_path)
+        n_points = len(raw_trace)
+        time_ms = np.linspace(0, 1000, n_points)
+        samples_per_ms = n_points / 1000.0
+        sampling_rate = 250.0
+
+        MIN_APD_MS = 140.0
+        min_apd_frames = int(MIN_APD_MS * samples_per_ms)
+        MAX_PHASE_WINDOW_MS = 600.0
+        max_phase_frames = int(MAX_PHASE_WINDOW_MS * samples_per_ms)
+
+        raw_norm = (raw_trace - raw_trace.min()) / (raw_trace.max() - raw_trace.min())
+
+        # Automated FFT cutoff selection
+        fft_vals = np.abs(fft(raw_norm))
+        fft_freqs = fftfreq(n_points, d=1.0 / sampling_rate)
+        half_points = n_points // 2
+        freqs_side = fft_freqs[:half_points]
+        vals_side = fft_vals[:half_points]
+        fft_slope = np.gradient(vals_side)
+        search_start_idx = np.searchsorted(freqs_side, 3.0)
+        search_end_idx = np.searchsorted(freqs_side, 50.0)
+        optimal_idx = search_start_idx + np.argmax(fft_slope[search_start_idx:search_end_idx])
+        detected_cutoff = freqs_side[optimal_idx]
+        CUTOFF_FREQUENCY = float(np.clip(detected_cutoff, 15.0, 45.0))
+
+        # Filter and derivatives
+        raw_smooth_butter = butter_lowpass_filter(raw_norm, cutoff=CUTOFF_FREQUENCY, fs=sampling_rate, order=4)
+        first_deriv_butter = np.gradient(raw_smooth_butter)
+        second_deriv_butter = np.gradient(first_deriv_butter)
+
+        min_distance_samples = int(100 * samples_per_ms)
+        upstroke_indices, _ = find_peaks(
+            first_deriv_butter,
+            height=0.05,
+            distance=min_distance_samples,
+            prominence=0.05
+        )
+
+        steep_indices = []
+        repol_indices = []
+
+        for i, up_idx in enumerate(upstroke_indices):
+            window_start = up_idx + min_apd_frames
+            if i + 1 < len(upstroke_indices):
+                next_upstroke = upstroke_indices[i + 1]
+            else:
+                next_upstroke = n_points - 1
+
+            window_end = min(up_idx + max_phase_frames, next_upstroke)
+            window_end = min(window_end, n_points - 1)
+
+            if window_start >= window_end:
+                window_start = up_idx + 5
+
+            steep = window_start + np.argmin(first_deriv_butter[window_start:window_end])
+            steep_indices.append(steep)
+
+            MAX_REPOL_LOOKAHEAD = 25
+            search_end = min(steep + MAX_REPOL_LOOKAHEAD, window_end)
+            if search_end > steep:
+                repol = steep + np.argmax(second_deriv_butter[steep:search_end])
+            else:
+                repol = steep
+            repol_indices.append(repol)
+
+        # Baseline correction via Savitzky-Golay
+        baseline_trace = raw_norm.copy().astype(float)
+        for up, re in zip(upstroke_indices, repol_indices):
+            baseline_trace[up:re] = np.nan
+
+        nan_mask = np.isnan(baseline_trace)
+        x_all = np.arange(n_points)
+        x_valid = x_all[~nan_mask]
+        y_valid = baseline_trace[~nan_mask]
+
+        if len(x_valid) < 2:
+            return "N/A", "N/A"
+
+        baseline_interpolated = np.interp(x_all, x_valid, y_valid)
+        baseline_smooth_savgol = savgol_filter(baseline_interpolated, window_length=21, polyorder=3)
+        corrected_trace_savgol = raw_norm - baseline_smooth_savgol
+
+        # ── FIXED: APD assignment — use indexed time_ms, not the full array ──
+        beat1_apd = "N/A"
+        beat2_apd = "N/A"
+
+        for up_idx, repol_idx in zip(upstroke_indices, repol_indices):
+            upstroke_time_ms = time_ms[up_idx]        # scalar, not array
+            calculated_apd = time_ms[repol_idx] - time_ms[up_idx]   # scalar
+
+            if 0.0 <= upstroke_time_ms < 575.0:
+                beat1_apd = round(float(calculated_apd), 2)
+            elif 575.0 <= upstroke_time_ms <= 1000.0:
+                beat2_apd = round(float(calculated_apd), 2)
+
+        # 4-panel plot
+        fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=False)
+
+        axes[0].plot(time_ms, raw_norm, color="lightgray", linewidth=1, label="Raw Noise")
+        axes[0].plot(time_ms, raw_smooth_butter, color="black", linewidth=1.5, label="Butterworth Filtered")
+        for up, st, re in zip(upstroke_indices, steep_indices, repol_indices):
+            axes[0].axvline(time_ms[up], color="red", linewidth=1.5)
+            axes[0].axvline(time_ms[st], color="magenta", linewidth=1.5)
+            axes[0].axvline(time_ms[re], color="blue", linewidth=1.5)
+        axes[0].set_xlabel("Time [ms]")
+        axes[0].set_ylabel("Normalized Signal")
+        axes[0].legend(loc="upper right")
+
+        axes[1].plot(time_ms, first_deriv_butter, color="black", linewidth=1.5, label="dF/dt")
+        axes[1].plot(time_ms, second_deriv_butter, color="gray", linewidth=1.0, label="d²F/dt²")
+        axes[1].axhline(0, color="gray", linewidth=1)
+        for up, st, re in zip(upstroke_indices, steep_indices, repol_indices):
+            axes[1].axvline(time_ms[up], color="red", linewidth=1.5)
+            axes[1].axvline(time_ms[st], color="magenta", linewidth=1.5)
+            axes[1].axvline(time_ms[re], color="blue", linewidth=1.5)
+        axes[1].set_xlabel("Time [ms]")
+        axes[1].set_ylabel("dF/dt")
+        axes[1].legend(loc="upper right")
+
+        axes[2].plot(time_ms, raw_norm, color="black", linewidth=1.5, label="Raw Trace")
+        axes[2].plot(time_ms, baseline_smooth_savgol, color="green", linewidth=1.5, label="Fitted Baseline (SavGol)")
+        axes[2].set_xlabel("Time [ms]")
+        axes[2].set_ylabel("Normalized Signal")
+        axes[2].legend(loc="upper right", fontsize=8)
+
+        axes[3].plot(time_ms, corrected_trace_savgol, color="black", linewidth=1.5)
+        axes[3].set_xlabel("Time [ms]")
+        axes[3].set_ylabel("Corrected Signal")
+
+        # Annotate APD values on panel 0
+        apd_label = f"Beat1 APD: {beat1_apd} ms  |  Beat2 APD: {beat2_apd} ms"
+        axes[0].set_title(apd_label, fontsize=10)
+
+        plt.tight_layout()
+
+        plot_filename = filename.replace(".npy", "_4panel.png")
+        plt.savefig(os.path.join(output_plot_dir, plot_filename), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        return beat1_apd, beat2_apd
+
+    except Exception as e:
+        print(f"--> Critical failure parsing {filename}: {str(e)}")
+        return -1, -1
+
+
+def batch_process_pipeline(data_folder, output_plot_dir, output_csv_path):
+    """Loops through data folder, coordinates processing, and outputs matrix dataframe."""
+    files = sorted([f for f in os.listdir(data_folder) if f.endswith(".npy")])
+
+    if not files:
+        print(f"No .npy files found in {data_folder}. Please check path.")
+        return
+
+    all_results = []
+    print(f"Found {len(files)} traces to process...")
+
+    for idx, filename in enumerate(files):
+        full_filepath = os.path.join(data_folder, filename)
+        beat1, beat2 = process_single_trace(full_filepath, filename, output_plot_dir)
+
+        all_results.append({
+            "Trace_Index": idx,
+            "Filename": filename,
+            "First_Beat_APD": beat1,
+            "Second_Beat_APD": beat2
+        })
+
+        if (idx + 1) % 50 == 0 or (idx + 1) == len(files):
+            print(f"Progress: Completed {idx + 1}/{len(files)} files.")
+
+    df = pd.DataFrame(all_results)
+    df.to_csv(output_csv_path, index=False)
+    print(f"\n[Success] Data Matrix exported to: {output_csv_path}")
+    print(f"[Success] 4-panel plots saved to: {output_plot_dir}")
+
+
+if __name__ == "__main__":
+    INPUT_FOLDER   = "data/2025-10-22/rec03/timeseries ratiometric raw/"
+    PLOT_OUTPUT_DIR = "rec03_corrected_plots/"
+    FINAL_CSV_PATH  = "batch_apd_reportrec03.csv"
+
+    os.makedirs(PLOT_OUTPUT_DIR, exist_ok=True)
+    batch_process_pipeline(INPUT_FOLDER, PLOT_OUTPUT_DIR, FINAL_CSV_PATH)
+
+
+# STEP 2: CLUSTERING
 
 import numpy as np
 import os
@@ -433,8 +228,12 @@ warnings.filterwarnings("ignore")
 # ─── Settings ────────────────────────────────────────────────────────────────
 
 recnum          = "rec07"
-folder          = f"data/2025-07-23/{recnum}/timeseries ratiometric raw/"
-output_dir      = f"data/2025-07-23/{recnum}/"
+if recnum == "rec02" or "rec07":
+    folder          = f"data/2025-07-23/{recnum}/timeseries ratiometric raw/"
+    output_dir      = f"data/2025-07-23/{recnum}/"
+elif recnum == "rec03" or "rec08":
+    folder          = f"data/2025-10-22/{recnum}/timeseries ratiometric raw/"
+    output_dir      = f"data/2025-10-22/{recnum}/"
 N_CLUSTERS      = 4
 sampling_rate   = 250.0
 MIN_APD_MS      = 140.0
