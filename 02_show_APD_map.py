@@ -689,4 +689,4 @@ def run_wave_explorer(recnum='rec08'):
     interactor.Start()
 
 if __name__ == '__main__':
-    run_wave_explorer(recnum="rec08")
+    run_wave_explorer(recnum="rec07")

@@ -1,214 +1,187 @@
-# STEP 1: GENERATE PLOTS AND CSV OF APD VALUES
+# # STEP 1: GENERATE PLOTS AND CSV OF APD VALUES
 
-import numpy as np
-import os
-import matplotlib.pyplot as plt
-import pandas as pd
-from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
-from scipy.fft import fft, fftfreq
-
-
-def butter_lowpass_filter(data, cutoff, fs, order=4):
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return filtfilt(b, a, data)
+# import os
+# import matplotlib.pyplot as plt
+# import numpy as np
+# import pandas as pd
+# from scipy.fft import fft, fftfreq
+# from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
 
 
-def process_single_trace(file_path, filename, output_plot_dir):
-    """
-    Processes a single .npy trace file, performs signal processing,
-    extracts up to two beat APDs separated by specific time windows,
-    and saves a 4-panel diagnostic plot.
-
-    Returns: (beat1_apd, beat2_apd) or (-1, -1) if an execution error occurs.
-    """
-    try:
-        raw_trace = np.load(file_path)
-        n_points = len(raw_trace)
-        time_ms = np.linspace(0, 1000, n_points)
-        samples_per_ms = n_points / 1000.0
-        sampling_rate = 250.0
-
-        MIN_APD_MS = 140.0
-        min_apd_frames = int(MIN_APD_MS * samples_per_ms)
-        MAX_PHASE_WINDOW_MS = 600.0
-        max_phase_frames = int(MAX_PHASE_WINDOW_MS * samples_per_ms)
-
-        raw_norm = (raw_trace - raw_trace.min()) / (raw_trace.max() - raw_trace.min())
-
-        # Automated FFT cutoff selection
-        fft_vals = np.abs(fft(raw_norm))
-        fft_freqs = fftfreq(n_points, d=1.0 / sampling_rate)
-        half_points = n_points // 2
-        freqs_side = fft_freqs[:half_points]
-        vals_side = fft_vals[:half_points]
-        fft_slope = np.gradient(vals_side)
-        search_start_idx = np.searchsorted(freqs_side, 3.0)
-        search_end_idx = np.searchsorted(freqs_side, 50.0)
-        optimal_idx = search_start_idx + np.argmax(fft_slope[search_start_idx:search_end_idx])
-        detected_cutoff = freqs_side[optimal_idx]
-        CUTOFF_FREQUENCY = float(np.clip(detected_cutoff, 15.0, 45.0))
-
-        # Filter and derivatives
-        raw_smooth_butter = butter_lowpass_filter(raw_norm, cutoff=CUTOFF_FREQUENCY, fs=sampling_rate, order=4)
-        first_deriv_butter = np.gradient(raw_smooth_butter)
-        second_deriv_butter = np.gradient(first_deriv_butter)
-
-        min_distance_samples = int(100 * samples_per_ms)
-        upstroke_indices, _ = find_peaks(
-            first_deriv_butter,
-            height=0.05,
-            distance=min_distance_samples,
-            prominence=0.05
-        )
-
-        steep_indices = []
-        repol_indices = []
-
-        for i, up_idx in enumerate(upstroke_indices):
-            window_start = up_idx + min_apd_frames
-            if i + 1 < len(upstroke_indices):
-                next_upstroke = upstroke_indices[i + 1]
-            else:
-                next_upstroke = n_points - 1
-
-            window_end = min(up_idx + max_phase_frames, next_upstroke)
-            window_end = min(window_end, n_points - 1)
-
-            if window_start >= window_end:
-                window_start = up_idx + 5
-
-            steep = window_start + np.argmin(first_deriv_butter[window_start:window_end])
-            steep_indices.append(steep)
-
-            MAX_REPOL_LOOKAHEAD = 25
-            search_end = min(steep + MAX_REPOL_LOOKAHEAD, window_end)
-            if search_end > steep:
-                repol = steep + np.argmax(second_deriv_butter[steep:search_end])
-            else:
-                repol = steep
-            repol_indices.append(repol)
-
-        # Baseline correction via Savitzky-Golay
-        baseline_trace = raw_norm.copy().astype(float)
-        for up, re in zip(upstroke_indices, repol_indices):
-            baseline_trace[up:re] = np.nan
-
-        nan_mask = np.isnan(baseline_trace)
-        x_all = np.arange(n_points)
-        x_valid = x_all[~nan_mask]
-        y_valid = baseline_trace[~nan_mask]
-
-        if len(x_valid) < 2:
-            return "N/A", "N/A"
-
-        baseline_interpolated = np.interp(x_all, x_valid, y_valid)
-        baseline_smooth_savgol = savgol_filter(baseline_interpolated, window_length=21, polyorder=3)
-        corrected_trace_savgol = raw_norm - baseline_smooth_savgol
-
-        # ── FIXED: APD assignment — use indexed time_ms, not the full array ──
-        beat1_apd = "N/A"
-        beat2_apd = "N/A"
-
-        for up_idx, repol_idx in zip(upstroke_indices, repol_indices):
-            upstroke_time_ms = time_ms[up_idx]        # scalar, not array
-            calculated_apd = time_ms[repol_idx] - time_ms[up_idx]   # scalar
-
-            if 0.0 <= upstroke_time_ms < 575.0:
-                beat1_apd = round(float(calculated_apd), 2)
-            elif 575.0 <= upstroke_time_ms <= 1000.0:
-                beat2_apd = round(float(calculated_apd), 2)
-
-        # 4-panel plot
-        fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=False)
-
-        axes[0].plot(time_ms, raw_norm, color="lightgray", linewidth=1, label="Raw Noise")
-        axes[0].plot(time_ms, raw_smooth_butter, color="black", linewidth=1.5, label="Butterworth Filtered")
-        for up, st, re in zip(upstroke_indices, steep_indices, repol_indices):
-            axes[0].axvline(time_ms[up], color="red", linewidth=1.5)
-            axes[0].axvline(time_ms[st], color="magenta", linewidth=1.5)
-            axes[0].axvline(time_ms[re], color="blue", linewidth=1.5)
-        axes[0].set_xlabel("Time [ms]")
-        axes[0].set_ylabel("Normalized Signal")
-        axes[0].legend(loc="upper right")
-
-        axes[1].plot(time_ms, first_deriv_butter, color="black", linewidth=1.5, label="dF/dt")
-        axes[1].plot(time_ms, second_deriv_butter, color="gray", linewidth=1.0, label="d²F/dt²")
-        axes[1].axhline(0, color="gray", linewidth=1)
-        for up, st, re in zip(upstroke_indices, steep_indices, repol_indices):
-            axes[1].axvline(time_ms[up], color="red", linewidth=1.5)
-            axes[1].axvline(time_ms[st], color="magenta", linewidth=1.5)
-            axes[1].axvline(time_ms[re], color="blue", linewidth=1.5)
-        axes[1].set_xlabel("Time [ms]")
-        axes[1].set_ylabel("dF/dt")
-        axes[1].legend(loc="upper right")
-
-        axes[2].plot(time_ms, raw_norm, color="black", linewidth=1.5, label="Raw Trace")
-        axes[2].plot(time_ms, baseline_smooth_savgol, color="green", linewidth=1.5, label="Fitted Baseline (SavGol)")
-        axes[2].set_xlabel("Time [ms]")
-        axes[2].set_ylabel("Normalized Signal")
-        axes[2].legend(loc="upper right", fontsize=8)
-
-        axes[3].plot(time_ms, corrected_trace_savgol, color="black", linewidth=1.5)
-        axes[3].set_xlabel("Time [ms]")
-        axes[3].set_ylabel("Corrected Signal")
-
-        # Annotate APD values on panel 0
-        apd_label = f"Beat1 APD: {beat1_apd} ms  |  Beat2 APD: {beat2_apd} ms"
-        axes[0].set_title(apd_label, fontsize=10)
-
-        plt.tight_layout()
-
-        plot_filename = filename.replace(".npy", "_4panel.png")
-        plt.savefig(os.path.join(output_plot_dir, plot_filename), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-
-        return beat1_apd, beat2_apd
-
-    except Exception as e:
-        print(f"--> Critical failure parsing {filename}: {str(e)}")
-        return -1, -1
+# def butter_lowpass_filter(data, cutoff, fs, order=4):
+#     nyquist = 0.5 * fs
+#     normal_cutoff = cutoff / nyquist
+#     b, a = butter(order, normal_cutoff, btype='low', analog=False)
+#     return filtfilt(b, a, data)
 
 
-def batch_process_pipeline(data_folder, output_plot_dir, output_csv_path):
-    """Loops through data folder, coordinates processing, and outputs matrix dataframe."""
-    files = sorted([f for f in os.listdir(data_folder) if f.endswith(".npy")])
+# def process_single_trace(file_path, filename, output_plot_dir):
+#     """
+#     Processes a single .npy trace file, performs signal processing,
+#     extracts up to two beat APDs separated by specific time windows,
+#     and saves a single-panel plot of the corrected signal.
 
-    if not files:
-        print(f"No .npy files found in {data_folder}. Please check path.")
-        return
+#     Returns: (beat1_apd, beat2_apd) or (-1, -1) if an execution error occurs.
+#     """
+#     try:
+#         raw_trace = np.load(file_path)
+#         n_points = len(raw_trace)
+#         time_ms = np.linspace(0, 1000, n_points)
+#         samples_per_ms = n_points / 1000.0
+#         sampling_rate = 250.0
 
-    all_results = []
-    print(f"Found {len(files)} traces to process...")
+#         MIN_APD_MS = 140.0
+#         min_apd_frames = int(MIN_APD_MS * samples_per_ms)
+#         MAX_PHASE_WINDOW_MS = 600.0
+#         max_phase_frames = int(MAX_PHASE_WINDOW_MS * samples_per_ms)
 
-    for idx, filename in enumerate(files):
-        full_filepath = os.path.join(data_folder, filename)
-        beat1, beat2 = process_single_trace(full_filepath, filename, output_plot_dir)
+#         raw_norm = (raw_trace - raw_trace.min()) / (raw_trace.max() - raw_trace.min())
 
-        all_results.append({
-            "Trace_Index": idx,
-            "Filename": filename,
-            "First_Beat_APD": beat1,
-            "Second_Beat_APD": beat2
-        })
+#         # Automated FFT cutoff selection
+#         fft_vals = np.abs(fft(raw_norm))
+#         fft_freqs = fftfreq(n_points, d=1.0 / sampling_rate)
+#         half_points = n_points // 2
+#         freqs_side = fft_freqs[:half_points]
+#         vals_side = fft_vals[:half_points]
+#         fft_slope = np.gradient(vals_side)
+#         search_start_idx = np.searchsorted(freqs_side, 3.0)
+#         search_end_idx = np.searchsorted(freqs_side, 50.0)
+#         optimal_idx = search_start_idx + np.argmax(fft_slope[search_start_idx:search_end_idx])
+#         detected_cutoff = freqs_side[optimal_idx]
+#         CUTOFF_FREQUENCY = float(np.clip(detected_cutoff, 15.0, 45.0))
 
-        if (idx + 1) % 50 == 0 or (idx + 1) == len(files):
-            print(f"Progress: Completed {idx + 1}/{len(files)} files.")
+#         # Filter and derivatives
+#         raw_smooth_butter = butter_lowpass_filter(raw_norm, cutoff=CUTOFF_FREQUENCY, fs=sampling_rate, order=4)
+#         first_deriv_butter = np.gradient(raw_smooth_butter)
+#         second_deriv_butter = np.gradient(first_deriv_butter)
 
-    df = pd.DataFrame(all_results)
-    df.to_csv(output_csv_path, index=False)
-    print(f"\n[Success] Data Matrix exported to: {output_csv_path}")
-    print(f"[Success] 4-panel plots saved to: {output_plot_dir}")
+#         min_distance_samples = int(100 * samples_per_ms)
+#         upstroke_indices, _ = find_peaks(
+#             first_deriv_butter,
+#             height=0.05,
+#             distance=min_distance_samples,
+#             prominence=0.05
+#         )
+
+#         steep_indices = []
+#         repol_indices = []
+
+#         for i, up_idx in enumerate(upstroke_indices):
+#             window_start = up_idx + min_apd_frames
+#             if i + 1 < len(upstroke_indices):
+#                 next_upstroke = upstroke_indices[i + 1]
+#             else:
+#                 next_upstroke = n_points - 1
+
+#             window_end = min(up_idx + max_phase_frames, next_upstroke)
+#             window_end = min(window_end, n_points - 1)
+
+#             if window_start >= window_end:
+#                 window_start = up_idx + 5
+
+#             steep = window_start + np.argmin(first_deriv_butter[window_start:window_end])
+#             steep_indices.append(steep)
+
+#             MAX_REPOL_LOOKAHEAD = 25
+#             search_end = min(steep + MAX_REPOL_LOOKAHEAD, window_end)
+#             if search_end > steep:
+#                 repol = steep + np.argmax(second_deriv_butter[steep:search_end])
+#             else:
+#                 repol = steep
+#             repol_indices.append(repol)
+
+#         # Baseline correction via Savitzky-Golay
+#         baseline_trace = raw_norm.copy().astype(float)
+#         for up, re in zip(upstroke_indices, repol_indices):
+#             baseline_trace[up:re] = np.nan
+
+#         nan_mask = np.isnan(baseline_trace)
+#         x_all = np.arange(n_points)
+#         x_valid = x_all[~nan_mask]
+#         y_valid = baseline_trace[~nan_mask]
+
+#         if len(x_valid) < 2:
+#             return "N/A", "N/A"
+
+#         baseline_interpolated = np.interp(x_all, x_valid, y_valid)
+#         baseline_smooth_savgol = savgol_filter(baseline_interpolated, window_length=21, polyorder=3)
+#         corrected_trace_savgol = raw_norm - baseline_smooth_savgol
+
+#         # APD assignment
+#         beat1_apd = "N/A"
+#         beat2_apd = "N/A"
+
+#         for up_idx, repol_idx in zip(upstroke_indices, repol_indices):
+#             upstroke_time_ms = time_ms[up_idx]
+#             calculated_apd = time_ms[repol_idx] - time_ms[up_idx]
+
+#             if 0.0 <= upstroke_time_ms < 575.0:
+#                 beat1_apd = round(float(calculated_apd), 2)
+#             elif 575.0 <= upstroke_time_ms <= 1000.0:
+#                 beat2_apd = round(float(calculated_apd), 2)
+
+#         # Single panel plot (only the 4th panel)
+#         fig, ax = plt.subplots(figsize=(10, 3.5))
+
+#         ax.plot(time_ms, corrected_trace_savgol, color="black", linewidth=1.5, label="Corrected Signal")
+#         ax.set_xlabel("Time [ms]")
+#         ax.set_ylabel("Corrected Signal")
+
+#         apd_label = f"Beat1 APD: {beat1_apd} ms  |  Beat2 APD: {beat2_apd} ms"
+#         ax.set_title(apd_label, fontsize=10)
+#         ax.legend(loc="upper right")
+
+#         plt.tight_layout()
+
+#         plot_filename = filename.replace(".npy", "_corrected.png")
+#         plt.savefig(os.path.join(output_plot_dir, plot_filename), dpi=150, bbox_inches="tight")
+#         plt.close(fig)
+
+#         return beat1_apd, beat2_apd
+
+#     except Exception as e:
+#         print(f"--> Critical failure parsing {filename}: {str(e)}")
+#         return -1, -1
 
 
-if __name__ == "__main__":
-    INPUT_FOLDER   = "data/2025-10-22/rec03/timeseries ratiometric raw/"
-    PLOT_OUTPUT_DIR = "rec03_corrected_plots/"
-    FINAL_CSV_PATH  = "batch_apd_reportrec03.csv"
+# def batch_process_pipeline(data_folder, output_plot_dir, output_csv_path):
+#     """Loops through data folder, coordinates processing, and outputs matrix dataframe."""
+#     files = sorted([f for f in os.listdir(data_folder) if f.endswith(".npy")])
 
-    os.makedirs(PLOT_OUTPUT_DIR, exist_ok=True)
-    batch_process_pipeline(INPUT_FOLDER, PLOT_OUTPUT_DIR, FINAL_CSV_PATH)
+#     if not files:
+#         print(f"No .npy files found in {data_folder}. Please check path.")
+#         return
+
+#     all_results = []
+#     print(f"Found {len(files)} traces to process...")
+
+#     for idx, filename in enumerate(files):
+#         full_filepath = os.path.join(data_folder, filename)
+#         beat1, beat2 = process_single_trace(full_filepath, filename, output_plot_dir)
+
+#         all_results.append({
+#             "Trace_Index": idx,
+#             "Filename": filename,
+#             "First_Beat_APD": beat1,
+#             "Second_Beat_APD": beat2
+#         })
+
+#         if (idx + 1) % 50 == 0 or (idx + 1) == len(files):
+#             print(f"Progress: Completed {idx + 1}/{len(files)} files.")
+
+#     df = pd.DataFrame(all_results)
+#     df.to_csv(output_csv_path, index=False)
+#     print(f"\n[Success] Data Matrix exported to: {output_csv_path}")
+#     print(f"[Success] Corrected plots saved to: {output_plot_dir}")
+
+
+# if __name__ == "__main__":
+#     INPUT_FOLDER   = "data/2025-10-22/rec03/timeseries ratiometric raw/"
+#     PLOT_OUTPUT_DIR = "rec03_corrected_plots/"
+#     FINAL_CSV_PATH  = "batch_apd_reportrec03.csv"
+
+#     os.makedirs(PLOT_OUTPUT_DIR, exist_ok=True)
+#     batch_process_pipeline(INPUT_FOLDER, PLOT_OUTPUT_DIR, FINAL_CSV_PATH)
 
 
 # STEP 2: CLUSTERING
@@ -227,14 +200,14 @@ warnings.filterwarnings("ignore")
 
 # ─── Settings ────────────────────────────────────────────────────────────────
 
-recnum          = "rec07"
-if recnum == "rec02" or "rec07":
+recnum          = "rec02"
+if recnum in ["rec02", "rec07"]:
     folder          = f"data/2025-07-23/{recnum}/timeseries ratiometric raw/"
     output_dir      = f"data/2025-07-23/{recnum}/"
-elif recnum == "rec03" or "rec08":
+elif recnum in ["rec03", "rec08"]:
     folder          = f"data/2025-10-22/{recnum}/timeseries ratiometric raw/"
     output_dir      = f"data/2025-10-22/{recnum}/"
-N_CLUSTERS      = 4
+N_CLUSTERS      = 5
 sampling_rate   = 250.0
 MIN_APD_MS      = 140.0
 MAX_APD_MS      = 600.0
@@ -664,3 +637,50 @@ np.save(os.path.join(output_dir, "feature_matrix.npy"), feature_matrix_clean)
 np.save(os.path.join(output_dir, "valid_indices.npy"),  valid_indices_clean)
 print("\nSaved feature_matrix.npy and valid_indices.npy")
 print("Done.")
+
+
+# ─── STEP 3: SPATIAL MAPPING & AUTOCORRELATION ──────────────────────────────────
+# Extract spatial coordinates (e.g., from filename "trace_x12_y34.npy" or a coordinates file)
+# Replace this snippet with your actual coordinate loading logic:
+coords = []
+for idx in valid_indices_clean:
+    fname = files[idx]
+    # Example parsing: "trace_x_y.npy" -> modify based on your exact filename format
+    # x, y = map(float, fname.replace('.npy','').split('_')[1:3])
+    # coords.append([x, y])
+    pass
+
+# If you have coordinates array `coords` (N_valid, 2):
+# Compute K-Nearest Neighbor (KNN) spatial purity to quantify spatial clustering
+from sklearn.neighbors import NearestNeighbors
+
+coords = np.array(coords) # Shape: (len(valid_indices_clean), 2 or 3)
+
+nbrs = NearestNeighbors(n_neighbors=6).fit(coords)
+distances, indices = nbrs.kneighbors(coords)
+
+# Calculate Spatial Homogeneity Ratio
+same_cluster_count = 0
+total_neighbors = 0
+
+for i, neighbor_idxs in enumerate(indices):
+    my_label = labels[i]
+    neighbor_labels = labels[neighbor_idxs[1:]] # exclude self
+    same_cluster_count += np.sum(neighbor_labels == my_label)
+    total_neighbors += len(neighbor_labels)
+
+spatial_homogeneity = same_cluster_count / total_neighbors
+print(f"Spatial Homogeneity Index: {spatial_homogeneity:.2%}")
+# High % (>60-70%) confirms traces with the same morphology ARE located in the same heart area.
+
+# ─── SPATIAL MAP PLOT ─────────────────────────────────────────────────────────
+plt.figure(figsize=(8, 7))
+scatter = plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap='tab10', s=25, alpha=0.9)
+plt.colorbar(scatter, label="Cluster ID")
+plt.xlabel("Spatial X (mm)")
+plt.ylabel("Spatial Y (mm)")
+plt.title("Spatial Distribution of Action Potential Morphologies")
+plt.axis("equal")
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "spatial_cluster_map.png"), dpi=200)
+plt.show()
